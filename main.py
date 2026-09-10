@@ -3,9 +3,13 @@
 使用 Typer 定义子命令，使用 Rich 负责彩色终端输出。
 """
 
+import inspect
+
 import typer
 from rich.console import Console
 from rich.markup import escape
+from rich.table import Table
+from typer.models import CommandInfo
 
 APP_NAME = "AI Coding Agent CLI"
 VERSION = "0.1"
@@ -50,6 +54,34 @@ def hello(
 def version() -> None:
     """输出版本号。"""
     console.print(f"{APP_NAME} v{VERSION}")
+
+
+def _command_name(command_info: CommandInfo) -> str:
+    """取命令名：装饰器显式指定时用它，否则退回函数名。"""
+    return command_info.name or command_info.callback.__name__
+
+
+def _command_summary(command_info: CommandInfo) -> str:
+    """取一句话说明：优先用装饰器 help= 参数，否则用函数 docstring 的首行。"""
+    text = command_info.help or inspect.cleandoc(command_info.callback.__doc__ or "")
+    lines = [line for line in text.splitlines() if line.strip()]
+    return lines[0].strip() if lines else "（暂无说明）"
+
+
+@app.command("help")  # 显式命名：函数名 help_command 避免遮蔽内置的 help()
+def help_command() -> None:
+    """显示所有可用命令及其说明。"""
+    show_banner()
+    # 直接读取 app 的命令注册表，新增子命令后这里会自动出现，不会漏写
+    table = Table(title="可用命令", title_style="bold", header_style="bold cyan")
+    table.add_column("命令", style="green", no_wrap=True)
+    table.add_column("说明")
+    for command_info in sorted(app.registered_commands, key=_command_name):
+        if command_info.hidden:  # 被标记为隐藏的命令不展示
+            continue
+        table.add_row(_command_name(command_info), _command_summary(command_info))
+    console.print(table)
+    console.print("用 [bold]python main.py <命令> --help[/bold] 查看某个命令的详细用法。")
 
 
 def main() -> None:
