@@ -20,3 +20,12 @@ python main.py hello --name NAME
 python main.py version
 python main.py help
 ```
+
+## 目录脚手架
+
+若需重建实验目录结构（可重复运行，不会覆盖已有文件）：
+
+```bash
+python init_project.py
+```
+
