@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+import chardet
 
 
 class FileToolError(Exception):
@@ -38,46 +42,90 @@ class WriteResult:
     created: bool
 
 
+@dataclass
+class DirEntry:
+    """目录中的一个文件或子目录。"""
+
+    name: str
+    path: str
+    is_dir: bool
+    size: int
+
+
 class FileTool:
     """为 Agent 提供文本文件读写能力。"""
 
-    def read(self, path: str | Path, encoding: str = "utf-8") -> FileContent:
+    @staticmethod
+    def _require_file(target: Path) -> None:
+        """确认路径指向普通文件，并包装路径检查产生的系统异常。"""
+        try:
+            if not target.exists():
+                raise FileReadError(f"文件不存在: {target}")
+            if not target.is_file():
+                raise FileReadError(f"不是普通文件: {target}")
+        except OSError as error:
+            raise FileReadError(f"检查文件失败: {error}") from error
+
+    @staticmethod
+    def _require_directory(target: Path) -> None:
+        """确认路径指向目录，并包装路径检查产生的系统异常。"""
+        try:
+            if not target.exists():
+                raise FileReadError(f"目录不存在: {target}")
+            if not target.is_dir():
+                raise FileReadError(f"不是目录: {target}")
+        except OSError as error:
+            raise FileReadError(f"检查目录失败: {error}") from error
+
+    def read(
+        self,
+        path: str | Path,
+        encoding: str | None = "utf-8",
+    ) -> FileContent:
         """读取文本文件并返回结构化结果。
 
         Args:
             path: 待读取文件的路径。
-            encoding: 文件的字符编码，默认为 UTF-8。
+            encoding: 文件的字符编码；传入 None 时自动检测。
 
         Raises:
             FileReadError: 路径不存在、不是文件、解码失败或读取失败。
         """
         target = Path(path)
-        if not target.exists():
-            raise FileReadError(f"文件不存在: {target}")
-        if not target.is_file():
-            raise FileReadError(f"不是普通文件: {target}")
+        self._require_file(target)
 
         try:
-            content = target.read_text(encoding=encoding)
-        except UnicodeDecodeError as error:
+            raw_content = target.read_bytes()
+            actual_encoding = encoding or self._detect_encoding(raw_content)
+            content = raw_content.decode(actual_encoding)
+        except (UnicodeDecodeError, LookupError) as error:
             raise FileReadError(
-                f"编码解码失败（encoding={encoding}），请检查文件编码: {error}"
+                f"编码解码失败（encoding={actual_encoding}），请检查文件编码: {error}"
             ) from error
         except OSError as error:
             raise FileReadError(f"读取失败: {error}") from error
 
-        size = len(content.encode(encoding))
-        line_count = content.count("\n")
-        if content and not content.endswith("\n"):
-            line_count += 1
+        line_count = len(content.splitlines())
 
         return FileContent(
             path=str(target),
             content=content,
-            encoding=encoding,
-            size=size,
+            encoding=actual_encoding,
+            size=len(raw_content),
             line_count=line_count,
         )
+
+    @staticmethod
+    def _detect_encoding(data: bytes) -> str:
+        """检测字节数据的编码，无法确定时回退到 UTF-8。"""
+        if not data:
+            return "utf-8"
+
+        try:
+            detected = chardet.detect(data).get("encoding")
+        except (TypeError, ValueError):
+            detected = None
+        return detected or "utf-8"
 
     def write(
         self,
@@ -98,18 +146,132 @@ class FileTool:
             FileWriteError: 禁止覆盖已有文件或写入失败。
         """
         target = Path(path)
-        if target.exists() and not overwrite:
+        try:
+            target_exists = target.exists()
+        except OSError as error:
+            raise FileWriteError(f"检查目标文件失败: {error}") from error
+
+        if target_exists and not overwrite:
             raise FileWriteError(f"文件已存在且不允许覆盖: {target}")
 
-        created = not target.exists()
+        created = not target_exists
         try:
+            bytes_written = len(content.encode(encoding))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding=encoding)
-        except (OSError, UnicodeEncodeError) as error:
+        except (OSError, UnicodeError, LookupError) as error:
             raise FileWriteError(f"写入失败: {error}") from error
 
         return WriteResult(
             path=str(target),
-            bytes_written=len(content.encode(encoding)),
+            bytes_written=bytes_written,
             created=created,
         )
+
+    def list_dir(
+        self,
+        path: str | Path,
+        recursive: bool = False,
+        pattern: str = "*",
+    ) -> list[DirEntry]:
+        """按稳定顺序返回目录项，可选择递归并按名称模式筛选。"""
+        target = Path(path)
+        self._require_directory(target)
+
+        try:
+            if recursive:
+                children = list(target.rglob(pattern))
+            else:
+                children = [
+                    child for child in target.iterdir() if child.match(pattern)
+                ]
+
+            entries: list[DirEntry] = []
+            for child in sorted(children, key=lambda item: item.as_posix()):
+                is_dir = child.is_dir()
+                size = 0 if is_dir else child.stat().st_size
+                entries.append(
+                    DirEntry(
+                        name=child.name,
+                        path=str(child),
+                        is_dir=is_dir,
+                        size=size,
+                    )
+                )
+        except OSError as error:
+            raise FileReadError(f"列举目录失败: {error}") from error
+
+        return entries
+
+    def append(
+        self,
+        path: str | Path,
+        content: str,
+        encoding: str = "utf-8",
+    ) -> WriteResult:
+        """在文件末尾追加文本，不存在时创建文件及其父目录。"""
+        target = Path(path)
+
+        try:
+            created = not target.exists()
+            bytes_written = len(content.encode(encoding))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding=encoding) as file:
+                file.write(content)
+        except (OSError, UnicodeError, LookupError) as error:
+            raise FileWriteError(f"追加失败: {error}") from error
+
+        return WriteResult(
+            path=str(target),
+            bytes_written=bytes_written,
+            created=created,
+        )
+
+    def read_lines(
+        self,
+        path: str | Path,
+        encoding: str | None = "utf-8",
+    ) -> list[str]:
+        """读取文本并返回不包含换行符的行列表。"""
+        return self.read(path, encoding=encoding).content.splitlines()
+
+    # ==================== Task 8：二进制读写与上下文管理器 ====================
+    # Step 13 的实现从这里开始，便于在实验报告和代码审查中快速定位。
+
+    def read_bytes(self, path: str | Path) -> bytes:
+        """读取二进制文件；路径错误和系统错误统一包装为 FileReadError。"""
+        target = Path(path)
+        self._require_file(target)
+
+        try:
+            return target.read_bytes()
+        except OSError as error:
+            raise FileReadError(f"二进制读取失败: {error}") from error
+
+    def write_bytes(self, path: str | Path, data: bytes) -> WriteResult:
+        """写入二进制数据，自动创建父目录并返回写入结果。"""
+        target = Path(path)
+
+        try:
+            created = not target.exists()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            bytes_written = target.write_bytes(data)
+        except OSError as error:
+            raise FileWriteError(f"二进制写入失败: {error}") from error
+
+        return WriteResult(
+            path=str(target),
+            bytes_written=bytes_written,
+            created=created,
+        )
+
+    @contextmanager
+    def batch(self) -> Iterator[FileTool]:
+        """标记一组批量文件操作，并保证结束信息一定输出。"""
+        print("批量开始")
+        try:
+            yield self
+        finally:
+            print("批量结束")
+
+    # ========================== Task 8 实现结束 ==========================
