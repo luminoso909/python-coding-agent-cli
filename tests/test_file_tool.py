@@ -53,6 +53,7 @@ def test_write_then_read_roundtrip(tmp_path: Path) -> None:
     assert result.bytes_written == 7
     assert result.created is True
     assert tool.read(path).content == "你好\n"
+    assert path.read_bytes() == "你好\n".encode("utf-8")
 
 
 def test_write_overwrites_existing_file(tmp_path: Path) -> None:
@@ -174,6 +175,7 @@ def test_append_twice_and_read_lines(tmp_path: Path) -> None:
     assert first.bytes_written == 6
     assert tool.read(path).content == "first\nsecond\r\nthird"
     assert tool.read_lines(path) == ["first", "second", "third"]
+    assert path.read_bytes() == b"first\nsecond\r\nthird"
 
 
 def test_read_detects_gbk_encoding(tmp_path: Path) -> None:

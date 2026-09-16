@@ -158,7 +158,7 @@ class FileTool:
         try:
             bytes_written = len(content.encode(encoding))
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding=encoding)
+            target.write_text(content, encoding=encoding, newline="")
         except (OSError, UnicodeError, LookupError) as error:
             raise FileWriteError(f"写入失败: {error}") from error
 
@@ -216,7 +216,7 @@ class FileTool:
             created = not target.exists()
             bytes_written = len(content.encode(encoding))
             target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("a", encoding=encoding) as file:
+            with target.open("a", encoding=encoding, newline="") as file:
                 file.write(content)
         except (OSError, UnicodeError, LookupError) as error:
             raise FileWriteError(f"追加失败: {error}") from error

@@ -864,6 +864,7 @@ console = Console()
 
 - **第 14–15 行**：全大写变量名是 Python 社区约定的"常量"标记（语法上并不强制）。把名称与版本号各定义一次，避免字面量在多处重复——这正是轮次 1 审查发现的改进点。
 - **第 18 行**：`typer.Typer()` 实例化出"命令集合容器"，赋给变量 `app`；`help=` 是 `python main.py --help` 时显示的顶层说明。`f"{APP_NAME} v{VERSION}"` 是 **f-string**，`{}` 中的表达式会被求值替换，结果即 `AI Coding Agent CLI v0.1`。**此时 `app` 内是空的，一个命令都没有。**
+    > 也就是说：启用 `help=f"{APP_NAME} v{VERSION}"` 后，在使用 `python main.py --help` 命令时，会先在顶层显示一行字符串 `f"{APP_NAME} v{VERSION}"`；如果不添加这一行，则使用 `help` 命令则不会有任何顶层说明。
 - **第 21 行**：`Console` 是 Rich 的"输出总管"，支持颜色/加粗/表格/进度条，且能自动感知终端能力（输出到管道或 CI 时自动降级为纯文本，这也是本报告能干净地复制输出文本的原因）。
 
 ### 6.4 横幅函数（第 24–26 行）
@@ -896,6 +897,8 @@ def _clean_name(value: str) -> str:
 - `if not name:` —— 空字符串 `""` 在 Python 中属于**假值（falsy）**，所以这句等价于 `if name == ""`，是惯用写法。
 - `raise typer.BadParameter(...)` 主动抛出 Typer 的参数异常：Typer 会捕获它，打印格式化的错误提示，并让进程以**退出码 2** 结束（命令行工具中非 0 退出码表示失败）。
 - 该函数同时实现了两件事：**修剪**（`'  Li Ming  '` → `'Li Ming'`）与**校验**（`'   '` → 报错）。
+
+![image](<image/report 1 键入名字不能为空.png>)
 
 ### 6.6 `hello` 子命令（第 37–50 行）
 
@@ -991,7 +994,9 @@ def help_command() -> None:
 ```
 
 - **第 59–61 行**：`command_info.name or command_info.callback.__name__` 利用 Python 的 **`or` 短路求值** —— `name` 为 `None`（未显式命名）时返回右侧的函数名。这是"取第一个非空值"的惯用写法。
-- **第 64–68 行**：说明取值有**三级兜底**：装饰器 `help=` 参数 → docstring 首行 → `"（暂无说明）"`。
+    > `_command_name` 专门用来处理 **显式改名** 情况：有艺名就用艺名（`@app.command("other_name")`），没艺名就用本名（函数名）。
+- **第 64–68 行**：说明取值有**三级兜底**：装饰器 `@app.command(help = "参数")` 中的
+ `help=` 参数 → docstring 首行 → `"（暂无说明）"`。
   - `inspect.cleandoc()` 负责去掉 docstring 的统一缩进（多行 docstring 在源码中有缩进，直接用会带一堆空格）。
   - `command_info.callback.__doc__ or ""` 处理"没有 docstring"（此时 `__doc__` 为 `None`）的情况，避免 `cleandoc(None)` 报错。
   - 列表推导式 `[line for line in ... if line.strip()]` 过滤掉空行，再取首行。
