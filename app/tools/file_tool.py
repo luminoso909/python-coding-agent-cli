@@ -55,6 +55,7 @@ class DirEntry:
 class FileTool:
     """为 Agent 提供文本文件读写能力。"""
 
+    # 下面的 target 是 pathlib.Path 对象，所以可以调用 .exists() | .is_file() | .is_dir() 方法来判断
     @staticmethod
     def _require_file(target: Path) -> None:
         """确认路径指向普通文件，并包装路径检查产生的系统异常。"""
@@ -92,8 +93,9 @@ class FileTool:
             FileReadError: 路径不存在、不是文件、解码失败或读取失败。
         """
         target = Path(path)
-        self._require_file(target)
 
+        # 判断路径异常性，然后文件判断编码方式并解码，如果编码输入错误则报错
+        self._require_file(target)
         try:
             raw_content = target.read_bytes()
             actual_encoding = encoding or self._detect_encoding(raw_content)
@@ -105,6 +107,7 @@ class FileTool:
         except OSError as error:
             raise FileReadError(f"读取失败: {error}") from error
 
+        # 文件分行输出列表，并 return
         line_count = len(content.splitlines())
 
         return FileContent(
@@ -122,7 +125,7 @@ class FileTool:
             return "utf-8"
 
         try:
-            detected = chardet.detect(data).get("encoding")
+            detected = chardet.detect(data).get("encoding")     # 检测字符类型，返回字典类似 {"encoding":str|None, "confidence":float, "language":str|None}
         except (TypeError, ValueError):
             detected = None
         return detected or "utf-8"
@@ -146,6 +149,8 @@ class FileTool:
             FileWriteError: 禁止覆盖已有文件或写入失败。
         """
         target = Path(path)
+
+        # 判断目标文件是否存在、是否可写
         try:
             target_exists = target.exists()
         except OSError as error:
@@ -157,15 +162,16 @@ class FileTool:
         created = not target_exists
         try:
             bytes_written = len(content.encode(encoding))
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.mkdir(parents=True, exist_ok=True)        # 这个主要是针对新建文件并写入的情况，新建文件时可以顺手把 dir 也一并建立
             target.write_text(content, encoding=encoding, newline="")
+            # newline 表示不做任何换行符（如多加 ‘\r’）转换，写入什么就是什么
         except (OSError, UnicodeError, LookupError) as error:
             raise FileWriteError(f"写入失败: {error}") from error
 
         return WriteResult(
             path=str(target),
-            bytes_written=bytes_written,
-            created=created,
+            bytes_written=bytes_written,        # 写入的字符（按照编码后字符计算）的数量（不是字节数量）
+            created=created,                    # 是否新创建（新建 or 覆盖）
         )
 
     def list_dir(

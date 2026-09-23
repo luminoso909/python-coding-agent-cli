@@ -1,9 +1,12 @@
-"""AI Coding Agent CLI —— 命令行程序入口。
+"""AI Coding Agent CLI 的唯一程序入口。"""
 
-使用 Typer 定义子命令，使用 Rich 负责彩色终端输出。
-"""
+from __future__ import annotations
 
+from getpass import getpass
 import inspect
+import json
+import os
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -11,13 +14,13 @@ from rich.markup import escape
 from rich.table import Table
 from typer.models import CommandInfo
 
+from app.agent.react_agent import Agent
+from app.llm.anthropic_client import AnthropicClient, LLMError, get_provider, text_content
+from app.tools.basic_tools import BasicTools
+
 APP_NAME = "AI Coding Agent CLI"
-VERSION = "0.1"
-
-# 创建 Typer 应用对象，后续用 @app.command() 往它身上挂子命令
+VERSION = "0.2"
 app = typer.Typer(help=f"{APP_NAME} v{VERSION}")
-
-# Rich 的控制台对象，负责格式化输出（颜色、加粗等）
 console = Console()
 
 
@@ -34,6 +37,39 @@ def _clean_name(value: str) -> str:
     return name
 
 
+def _make_client(
+    provider_name: str,
+    model_option: str | None,
+    base_url: str | None,
+) -> AnthropicClient:
+    """从统一选项和厂商环境变量创建客户端。"""
+    try:
+        provider = get_provider(provider_name)
+    except ValueError as error:
+        raise typer.BadParameter(str(error), param_hint="--provider") from error
+
+    model = model_option or os.environ.get(provider.model_env) or provider.default_model
+    if not model:
+        raise typer.BadParameter(
+            f"请用 --model 或环境变量 {provider.model_env} 指定模型",
+            param_hint="--model",
+        )
+    api_key = os.environ.get(provider.api_key_env)
+    if not api_key:
+        api_key = getpass(f"{provider.name} API Key: ").strip()
+    if not api_key:
+        raise typer.BadParameter(
+            f"请设置环境变量 {provider.api_key_env}",
+            param_hint="--provider",
+        )
+    return AnthropicClient(
+        api_key,
+        model,
+        provider=provider_name,
+        base_url=base_url,
+    )
+
+
 @app.command()
 def hello(
     name: str = typer.Option(
@@ -41,12 +77,11 @@ def hello(
         "--name",
         "-n",
         help="要问候的名字",
-        callback=_clean_name,  # Typer 在解析完参数后调用，用于校验/清洗
+        callback=_clean_name,
     ),
 ) -> None:
-    """向指定用户打招呼（--name 可自定义名字）。"""
+    """向指定用户打招呼。"""
     show_banner()
-    # escape() 把用户输入里的 [xxx] 转义成普通文本，避免被 Rich 当成样式标记解析
     console.print(f"Hello, {escape(name)}! Welcome to {APP_NAME}.")
 
 
@@ -56,39 +91,103 @@ def version() -> None:
     console.print(f"{APP_NAME} v{VERSION}")
 
 
+@app.command()
+def chat(
+    prompt: str = typer.Argument(..., help="普通对话内容"),
+    provider: str = typer.Option("deepseek", help="deepseek 或 glm"),
+    model: str | None = typer.Option(None, help="模型名；默认读取厂商环境变量"),
+    base_url: str | None = typer.Option(
+        None,
+        help="完整的 /v1/messages 地址；用于覆盖默认端点",
+    ),
+) -> None:
+    """通过 Anthropic Messages 兼容接口进行一次普通对话。"""
+    client = _make_client(provider, model, base_url)
+    try:
+        message = client.chat([{"role": "user", "content": prompt}])
+        console.print(text_content(message))
+    except LLMError as error:
+        console.print(f"[red]{escape(str(error))}[/red]")
+        raise typer.Exit(1) from error
+    finally:
+        client.close()
+
+
+@app.command()
+def agent(
+    prompt: str = typer.Argument(..., help="需要 Agent 实际完成的任务"),
+    provider: str = typer.Option("deepseek", help="deepseek 或 glm"),
+    model: str | None = typer.Option(None, help="模型名；默认读取厂商环境变量"),
+    base_url: str | None = typer.Option(
+        None,
+        help="完整的 /v1/messages 地址；用于覆盖默认端点",
+    ),
+    root: Path = typer.Option(Path("demo_lab03"), help="四工具允许访问的根目录"),
+    max_iterations: int = typer.Option(8, min=1, help="一次任务最多请求模型的次数"),
+    follow_up: str | None = typer.Option(None, help="首个任务结束后的同会话追问"),
+    trace: bool = typer.Option(False, help="输出完整 Anthropic 消息历史"),
+) -> None:
+    """运行可列目录、读写文件和执行固定命令的最小 ReAct Agent。"""
+    resolved_root = root.resolve()
+    if not resolved_root.is_dir():
+        raise typer.BadParameter(f"目录不存在: {resolved_root}", param_hint="--root")
+
+    client = _make_client(provider, model, base_url)
+    runner = Agent(
+        client,
+        BasicTools(resolved_root),
+        max_iterations=max_iterations,
+    )
+    try:
+        result = runner.run(prompt)
+        console.print(f"{result.status} / iterations={result.iterations}")
+        console.print(result.content)
+        if follow_up and result.status == "completed":
+            result = runner.run(follow_up)
+            console.print(f"follow-up {result.status} / iterations={result.iterations}")
+            console.print(result.content)
+        if trace:
+            for index, message in enumerate(runner.messages, start=1):
+                console.print(
+                    f"[{index}] "
+                    + json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+                )
+        if result.status != "completed":
+            raise typer.Exit(1)
+    finally:
+        client.close()
+
+
 def _command_name(command_info: CommandInfo) -> str:
-    """取命令名：装饰器显式指定时用它，否则退回函数名。"""
+    """取得 Typer 命令的显示名称。"""
     return command_info.name or command_info.callback.__name__
 
 
 def _command_summary(command_info: CommandInfo) -> str:
-    """取一句话说明：优先用装饰器 help= 参数，否则用函数 docstring 的首行。"""
+    """取得命令 docstring 的第一条非空行。"""
     text = command_info.help or inspect.cleandoc(command_info.callback.__doc__ or "")
     lines = [line for line in text.splitlines() if line.strip()]
     return lines[0].strip() if lines else "（暂无说明）"
 
 
-@app.command("help")  # 显式命名：函数名 help_command 避免遮蔽内置的 help()
+@app.command("help")
 def help_command() -> None:
     """显示所有可用命令及其说明。"""
     show_banner()
-    # 直接读取 app 的命令注册表，新增子命令后这里会自动出现，不会漏写
     table = Table(title="可用命令", title_style="bold", header_style="bold cyan")
     table.add_column("命令", style="green", no_wrap=True)
     table.add_column("说明")
     for command_info in sorted(app.registered_commands, key=_command_name):
-        if command_info.hidden:  # 被标记为隐藏的命令不展示
-            continue
-        table.add_row(_command_name(command_info), _command_summary(command_info))
+        if not command_info.hidden:
+            table.add_row(_command_name(command_info), _command_summary(command_info))
     console.print(table)
-    console.print("用 [bold]python main.py <命令> --help[/bold] 查看某个命令的详细用法。")
+    console.print("用 [bold]python main.py <命令> --help[/bold] 查看详细用法。")
 
 
 def main() -> None:
-    """程序入口函数：把命令行参数交给 Typer 解析并分发到对应子命令。"""
+    """唯一入口：把命令行参数交给 Typer 分发。"""
     app()
 
 
 if __name__ == "__main__":
-    # 仅当作为脚本直接运行时才执行，被 import 时不会触发
     main()
