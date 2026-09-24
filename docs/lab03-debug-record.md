@@ -2,7 +2,7 @@
 
 ### 1. 本轮任务
 
-本轮使用测试内的 FakeLLMClient、真实临时文件工具和 `httpx.MockTransport` 审查 Anthropic Messages 版 Agent 契约，全程没有调用真实模型 API：
+本轮使用可复用的 `app.llm.fake_client.FakeLLMClient`、真实临时文件工具和 `httpx.MockTransport` 审查 Anthropic Messages 版 Agent 契约，全程没有调用真实模型 API：
 
 - assistant 的 `tool_use` 必须先进入历史，随后才出现对应的 user `tool_result`；
 - `tool_use_id` 必须与 `tool_use.id` 配对；
@@ -12,7 +12,7 @@
 - `MAX_ITERATIONS` 只限制一次 `run()` 的模型请求次数，不允许额外请求总结；
 - 用户追问继续使用原会话历史，但本次迭代计数重新开始。
 
-上述契约已由 Fake 与 HTTP Mock 覆盖。完整项目当前为 72 项测试通过。
+上述契约已由 Fake 与 HTTP Mock 覆盖。恢复 Lab01 脚手架并补充单入口 Fake 演示后，完整项目当前为 77 项测试通过。
 
 ## 二、测试场景及其能发现的错误
 
@@ -69,3 +69,15 @@ Anthropic Messages 也没有独立的 `role="tool"`。模型工具申请位于 a
 ## 五、结论边界
 
 Fake 能证明控制流、历史、调用顺序和本地工具结果；HTTP Mock 能证明 DeepSeek 与 GLM 共用同一请求构造和响应解析。它们不证明真实密钥、账号套餐、模型名或远端服务当前可用。真实 API 是否可用，需要用户配置对应环境变量后单独运行入口命令验证。
+
+## 六、Lab01 至 Lab03 完整性回归
+
+对比 `fef7e5e` 与 `e647540` 后，恢复了曾被删除的 `init_project.py`、`app/cli/__init__.py` 和 `app/core/__init__.py`，并在 README 中补回脚手架运行说明。Lab01 测试验证 `hello`、空名字、`version`、动态 `help`，以及脚手架的幂等和不覆盖行为；Lab02 原有 30 项测试保持通过。
+
+Lab03 将 Fake Client 从测试文件内部提取为正式模块，并通过唯一入口提供离线演示：
+
+```bash
+python main.py agent '完成四工具任务' --fake --root demo_lab03 --trace
+```
+
+该命令在不使用 API Key 的情况下完成五次模型请求，真实执行目录列举、文件读取、文件写入和固定 echo，并可继续执行同会话追问。最终回归结果为：Lab01 4 项、Lab02 30 项、Lab03 43 项，共 77 项通过。

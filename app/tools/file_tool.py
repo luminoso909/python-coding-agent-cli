@@ -170,8 +170,8 @@ class FileTool:
 
         return WriteResult(
             path=str(target),
-            bytes_written=bytes_written,        # 写入的字符（按照编码后字符计算）的数量（不是字节数量）
-            created=created,                    # 是否新创建（新建 or 覆盖）
+            bytes_written=bytes_written,        # 按指定编码后实际写入的字节数量
+            created=created,                    # 是否新创建（新建或覆盖）
         )
 
     def list_dir(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import json
 from pathlib import Path
 import subprocess
@@ -10,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from typer.testing import CliRunner
 
 from app.agent.react_agent import Agent
 from app.llm.anthropic_client import (
@@ -19,37 +19,9 @@ from app.llm.anthropic_client import (
     ProtocolError,
     get_provider,
 )
+from app.llm.fake_client import FakeLLMClient
 from app.tools.basic_tools import BasicTools
-
-
-class FakeLLMClient:
-    """依次返回预设响应，并保存每次请求的深拷贝。"""
-
-    def __init__(self, responses: list[Message]) -> None:
-        self._responses = deepcopy(responses)
-        self.requests: list[dict[str, Any]] = []
-
-    def chat(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        *,
-        system: str | None = None,
-    ) -> Message:
-        self.requests.append(
-            {
-                "messages": deepcopy(messages),
-                "tools": deepcopy(tools),
-                "system": system,
-            }
-        )
-        if not self._responses:
-            raise RuntimeError("FakeLLMClient 没有剩余响应")
-        return deepcopy(self._responses.pop(0))
-
-    @property
-    def remaining_responses(self) -> int:
-        return len(self._responses)
+from main import app as cli_app
 
 
 def text_message(text: str) -> Message:
@@ -521,3 +493,33 @@ def test_tool_failure_is_backfed_as_error_result(tmp_path: Path) -> None:
     assert observation["is_error"] is True
     assert json.loads(observation["content"])["ok"] is False
     assert "文件不存在" in json.loads(observation["content"])["error"]
+
+
+def test_single_entry_fake_demo_executes_four_tools(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("真实说明内容\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli_app,
+        [
+            "agent",
+            "完成四工具任务",
+            "--fake",
+            "--root",
+            str(tmp_path),
+            "--follow-up",
+            "请回读报告并复核",
+            "--trace",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "FAKE completed / iterations=5" in result.output
+    assert "follow-up completed / iterations=2" in result.output
+    assert "call_list" in result.output
+    assert "call_read" in result.output
+    assert "call_write" in result.output
+    assert "call_echo" in result.output
+    assert "call_follow_up_read" in result.output
+    reports = list(tmp_path.glob("report-fake-*.txt"))
+    assert len(reports) == 1
+    assert "工具结果必须回灌" in reports[0].read_text(encoding="utf-8")

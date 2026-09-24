@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+from uuid import uuid4
 
 import typer
 from rich.console import Console
@@ -15,12 +16,23 @@ from rich.table import Table
 from typer.models import CommandInfo
 
 from app.agent.react_agent import Agent
-from app.llm.anthropic_client import AnthropicClient, LLMError, get_provider, text_content
+from app.llm.anthropic_client import (
+    AnthropicClient,
+    LLMError,
+    Message,
+    get_provider,
+    text_content,
+)
+from app.llm.fake_client import FakeLLMClient
 from app.tools.basic_tools import BasicTools
 
 APP_NAME = "AI Coding Agent CLI"
 VERSION = "0.2"
+
+# Lab01 的 Typer 应用对象仍是全项目唯一入口；后续实验只增加子命令。
 app = typer.Typer(help=f"{APP_NAME} v{VERSION}")
+
+# Rich 负责横幅、表格和错误信息等终端输出。
 console = Console()
 
 
@@ -70,6 +82,65 @@ def _make_client(
     )
 
 
+def _fake_text(text: str) -> Message:
+    """构造 Anthropic Messages 格式的 Fake 文本响应。"""
+    return {"role": "assistant", "content": [{"type": "text", "text": text}]}
+
+
+def _fake_tool(call_id: str, name: str, values: dict[str, object]) -> Message:
+    """构造只包含一个 tool_use 内容块的 Fake 响应。"""
+    return {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": call_id, "name": name, "input": values}
+        ],
+    }
+
+
+def _make_fake_client(report_name: str, include_follow_up: bool) -> FakeLLMClient:
+    """创建课程要求的确定性四工具轨迹。"""
+    responses = [
+        _fake_tool("call_list", "list_dir", {"path": "."}),
+        _fake_tool("call_read", "read_file", {"path": "notes.txt"}),
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "我将依据读取结果写报告。"},
+                {
+                    "type": "tool_use",
+                    "id": "call_write",
+                    "name": "write_file",
+                    "input": {
+                        "path": report_name,
+                        "content": (
+                            "Fake 预设报告：工具结果必须回灌，"
+                            "工具申请不等于执行。\n"
+                        ),
+                    },
+                },
+            ],
+        },
+        _fake_tool(
+            "call_echo",
+            "execute_command",
+            {"command": "echo lab03-shell-ok"},
+        ),
+        _fake_text(f"Fake 四工具轨迹完成；报告已写入 {report_name}。"),
+    ]
+    if include_follow_up:
+        responses.extend(
+            [
+                _fake_tool(
+                    "call_follow_up_read",
+                    "read_file",
+                    {"path": report_name},
+                ),
+                _fake_text(f"Fake 追问已回读并复核 {report_name}。"),
+            ]
+        )
+    return FakeLLMClient(responses)
+
+
 @app.command()
 def hello(
     name: str = typer.Option(
@@ -77,11 +148,13 @@ def hello(
         "--name",
         "-n",
         help="要问候的名字",
+        # Typer 解析参数后调用，用于去除空白并拒绝空名字。
         callback=_clean_name,
     ),
 ) -> None:
-    """向指定用户打招呼。"""
+    """向指定用户打招呼（--name 可自定义名字）。"""
     show_banner()
+    # 避免用户输入被 Rich 当成样式标记解析。
     console.print(f"Hello, {escape(name)}! Welcome to {APP_NAME}.")
 
 
@@ -126,13 +199,25 @@ def agent(
     max_iterations: int = typer.Option(8, min=1, help="一次任务最多请求模型的次数"),
     follow_up: str | None = typer.Option(None, help="首个任务结束后的同会话追问"),
     trace: bool = typer.Option(False, help="输出完整 Anthropic 消息历史"),
+    fake: bool = typer.Option(
+        False,
+        "--fake",
+        help="使用确定性 Fake 响应离线执行四工具轨迹",
+    ),
 ) -> None:
     """运行可列目录、读写文件和执行固定命令的最小 ReAct Agent。"""
     resolved_root = root.resolve()
     if not resolved_root.is_dir():
         raise typer.BadParameter(f"目录不存在: {resolved_root}", param_hint="--root")
 
-    client = _make_client(provider, model, base_url)
+    if fake:
+        report_name = f"report-fake-{uuid4().hex[:8]}.txt"
+        client = _make_fake_client(
+            report_name,
+            include_follow_up=follow_up is not None,
+        )
+    else:
+        client = _make_client(provider, model, base_url)
     runner = Agent(
         client,
         BasicTools(resolved_root),
@@ -140,7 +225,8 @@ def agent(
     )
     try:
         result = runner.run(prompt)
-        console.print(f"{result.status} / iterations={result.iterations}")
+        mode = "FAKE" if fake else "LIVE"
+        console.print(f"{mode} {result.status} / iterations={result.iterations}")
         console.print(result.content)
         if follow_up and result.status == "completed":
             result = runner.run(follow_up)
@@ -177,6 +263,7 @@ def help_command() -> None:
     table = Table(title="可用命令", title_style="bold", header_style="bold cyan")
     table.add_column("命令", style="green", no_wrap=True)
     table.add_column("说明")
+    # 动态读取命令注册表，新增 Lab03 命令后无需维护硬编码清单。
     for command_info in sorted(app.registered_commands, key=_command_name):
         if not command_info.hidden:
             table.add_row(_command_name(command_info), _command_summary(command_info))
@@ -190,4 +277,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # 被其他模块 import 时不会启动 CLI。
     main()

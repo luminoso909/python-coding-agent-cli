@@ -23,6 +23,23 @@ python main.py version
 python main.py help
 ```
 
+## 目录脚手架
+
+Lab01 的 `init_project.py` 用于补齐课程目录和 Python 包标记。脚本可以重复运行，且不会覆盖已有的 `__init__.py`：
+
+```bash
+python init_project.py
+```
+
+## 离线 Fake 演示
+
+不配置 API Key 也可以通过唯一入口运行 Lab03 的确定性四工具轨迹。目录枚举、文件读写与固定命令仍由本地程序真实执行：
+
+```bash
+python main.py agent '列目录、读取 notes.txt、写报告并执行固定 echo' \
+  --fake --root demo_lab03 --trace
+```
+
 ## DeepSeek
 
 DeepSeek 默认模型为 `deepseek-flash`，也可用 `DEEPSEEK_MODEL` 或 `--model` 覆盖：
