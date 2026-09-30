@@ -29,7 +29,7 @@ from app.tools.basic_tools import BasicTools
 APP_NAME = "AI Coding Agent CLI"
 VERSION = "0.2"
 
-# Lab01 的 Typer 应用对象仍是全项目唯一入口；后续实验只增加子命令。
+# 所有功能都注册到同一个 Typer 应用，由此保持统一的命令行入口。
 app = typer.Typer(help=f"{APP_NAME} v{VERSION}")
 
 # Rich 负责横幅、表格和错误信息等终端输出。
@@ -97,11 +97,30 @@ def _fake_tool(call_id: str, name: str, values: dict[str, object]) -> Message:
     }
 
 
-def _make_fake_client(report_name: str, include_follow_up: bool) -> FakeLLMClient:
-    """创建课程要求的确定性四工具轨迹。"""
+def _make_fake_client(
+    report_name: str,
+    binary_name: str,
+    include_follow_up: bool,
+) -> FakeLLMClient:
+    """创建用于离线验证的确定性工具调用轨迹。"""
     responses = [
-        _fake_tool("call_list", "list_dir", {"path": "."}),
-        _fake_tool("call_read", "read_file", {"path": "notes.txt"}),
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_list",
+                    "name": "list_dir",
+                    "input": {"path": "."},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_read",
+                    "name": "read_file",
+                    "input": {"path": "notes.txt"},
+                },
+            ],
+        },
         {
             "role": "assistant",
             "content": [
@@ -121,11 +140,23 @@ def _make_fake_client(report_name: str, include_follow_up: bool) -> FakeLLMClien
             ],
         },
         _fake_tool(
+            "call_append",
+            "append_file",
+            {"path": report_name, "content": "追加写入验证完成。\n"},
+        ),
+        _fake_tool("call_lines", "read_lines", {"path": report_name}),
+        _fake_tool(
+            "call_write_bytes",
+            "write_bytes",
+            {"path": binary_name, "data_base64": "YWdlbnQtYmluYXJ5"},
+        ),
+        _fake_tool("call_read_bytes", "read_bytes", {"path": binary_name}),
+        _fake_tool(
             "call_echo",
             "execute_command",
             {"command": "echo lab03-shell-ok"},
         ),
-        _fake_text(f"Fake 四工具轨迹完成；报告已写入 {report_name}。"),
+        _fake_text(f"Fake 工具调用轨迹完成；报告已写入 {report_name}。"),
     ]
     if include_follow_up:
         responses.extend(
@@ -195,14 +226,14 @@ def agent(
         None,
         help="完整的 /v1/messages 地址；用于覆盖默认端点",
     ),
-    root: Path = typer.Option(Path("demo_lab03"), help="四工具允许访问的根目录"),
+    root: Path = typer.Option(Path("test_path"), help="工具允许访问的根目录"),
     max_iterations: int = typer.Option(8, min=1, help="一次任务最多请求模型的次数"),
     follow_up: str | None = typer.Option(None, help="首个任务结束后的同会话追问"),
     trace: bool = typer.Option(False, help="输出完整 Anthropic 消息历史"),
     fake: bool = typer.Option(
         False,
         "--fake",
-        help="使用确定性 Fake 响应离线执行四工具轨迹",
+        help="使用确定性 Fake 响应离线执行工具调用轨迹",
     ),
 ) -> None:
     """运行可列目录、读写文件和执行固定命令的最小 ReAct Agent。"""
@@ -211,9 +242,12 @@ def agent(
         raise typer.BadParameter(f"目录不存在: {resolved_root}", param_hint="--root")
 
     if fake:
-        report_name = f"report-fake-{uuid4().hex[:8]}.txt"
+        artifact_id = uuid4().hex[:8]
+        report_name = f"report-fake-{artifact_id}.txt"
+        binary_name = f"payload-fake-{artifact_id}.bin"
         client = _make_fake_client(
             report_name,
+            binary_name,
             include_follow_up=follow_up is not None,
         )
     else:
@@ -263,7 +297,7 @@ def help_command() -> None:
     table = Table(title="可用命令", title_style="bold", header_style="bold cyan")
     table.add_column("命令", style="green", no_wrap=True)
     table.add_column("说明")
-    # 动态读取命令注册表，新增 Lab03 命令后无需维护硬编码清单。
+    # 动态读取命令注册表，新增命令后无需维护硬编码清单。
     for command_info in sorted(app.registered_commands, key=_command_name):
         if not command_info.hidden:
             table.add_row(_command_name(command_info), _command_summary(command_info))

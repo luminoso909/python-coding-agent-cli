@@ -3,4 +3,4 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .DS_Store
-demo_lab03/report-*.txt
+test_path/

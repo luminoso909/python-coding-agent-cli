@@ -1,4 +1,4 @@
-"""验证 Anthropic HTTP 契约、四工具边界和最小 ReAct 闭环。"""
+"""验证 Anthropic HTTP 契约、工具边界和最小 ReAct 闭环。"""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from app.llm.anthropic_client import (
 )
 from app.llm.fake_client import FakeLLMClient
 from app.tools.basic_tools import BasicTools
+from app.tools.file_tool import FileTool
 from main import app as cli_app
 
 
@@ -221,15 +222,34 @@ def test_anthropic_client_rejects_invalid_tool_use(
     transport.close()
 
 
-def test_four_schemas_use_anthropic_input_schema(tmp_path: Path) -> None:
+def test_schemas_use_anthropic_input_schema(tmp_path: Path) -> None:
     schemas = BasicTools(tmp_path).schemas
     assert [item["name"] for item in schemas] == [
-        "read_file", "write_file", "list_dir", "execute_command"
+        "read_file",
+        "write_file",
+        "list_dir",
+        "execute_command",
+        "append_file",
+        "read_lines",
+        "read_bytes",
+        "write_bytes",
     ]
     assert all(
         item["input_schema"]["additionalProperties"] is False for item in schemas
     )
     assert all("function" not in item for item in schemas)
+
+
+def test_every_file_tool_operation_has_a_registered_adapter(tmp_path: Path) -> None:
+    public_operations = {
+        name
+        for name, value in vars(FileTool).items()
+        if not name.startswith("_") and callable(value)
+    }
+    assert public_operations == set(BasicTools.FILE_METHOD_ADAPTERS) | {"batch"}
+
+    schema_names = {item["name"] for item in BasicTools(tmp_path).schemas}
+    assert set(BasicTools.FILE_METHOD_ADAPTERS.values()) <= schema_names
 
 
 def test_dispatch_reuses_file_tool_with_decoded_input(tmp_path: Path) -> None:
@@ -238,6 +258,58 @@ def test_dispatch_reuses_file_tool_with_decoded_input(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["content"] == "中文说明\n"
     assert result["line_count"] == 1
+
+
+def test_append_and_read_lines_are_registered(tmp_path: Path) -> None:
+    tools = BasicTools(tmp_path)
+    first = tools.dispatch(
+        "append_file", {"path": "journal.txt", "content": "first\n"}
+    )
+    second = tools.dispatch(
+        "append_file", {"path": "journal.txt", "content": "second\n"}
+    )
+    lines = tools.dispatch("read_lines", {"path": "journal.txt"})
+
+    assert first["ok"] is True and first["created"] is True
+    assert second["ok"] is True and second["created"] is False
+    assert lines == {
+        "ok": True,
+        "path": "journal.txt",
+        "lines": ["first", "second"],
+        "line_count": 2,
+    }
+
+
+def test_binary_tools_use_base64_for_json_transport(tmp_path: Path) -> None:
+    tools = BasicTools(tmp_path)
+    written = tools.dispatch(
+        "write_bytes",
+        {"path": "payload.bin", "data_base64": "AP+AQUdFTlQ="},
+    )
+    read = tools.dispatch("read_bytes", {"path": "payload.bin"})
+
+    assert written == {
+        "ok": True,
+        "path": "payload.bin",
+        "bytes_written": 8,
+        "created": True,
+    }
+    assert read == {
+        "ok": True,
+        "path": "payload.bin",
+        "data_base64": "AP+AQUdFTlQ=",
+        "bytes_read": 8,
+    }
+
+
+def test_write_bytes_rejects_invalid_base64(tmp_path: Path) -> None:
+    result = BasicTools(tmp_path).dispatch(
+        "write_bytes",
+        {"path": "payload.bin", "data_base64": "not base64!"},
+    )
+    assert result["ok"] is False
+    assert "Base64" in result["error"]
+    assert not (tmp_path / "payload.bin").exists()
 
 
 @pytest.mark.parametrize(
@@ -495,14 +567,14 @@ def test_tool_failure_is_backfed_as_error_result(tmp_path: Path) -> None:
     assert "文件不存在" in json.loads(observation["content"])["error"]
 
 
-def test_single_entry_fake_demo_executes_four_tools(tmp_path: Path) -> None:
+def test_single_entry_fake_demo_executes_registered_file_tools(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("真实说明内容\n", encoding="utf-8")
 
     result = CliRunner().invoke(
         cli_app,
         [
             "agent",
-            "完成四工具任务",
+            "完成工具调用任务",
             "--fake",
             "--root",
             str(tmp_path),
@@ -513,13 +585,21 @@ def test_single_entry_fake_demo_executes_four_tools(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert "FAKE completed / iterations=5" in result.output
+    assert "FAKE completed / iterations=8" in result.output
     assert "follow-up completed / iterations=2" in result.output
     assert "call_list" in result.output
     assert "call_read" in result.output
     assert "call_write" in result.output
+    assert "call_append" in result.output
+    assert "call_lines" in result.output
+    assert "call_write_bytes" in result.output
+    assert "call_read_bytes" in result.output
     assert "call_echo" in result.output
     assert "call_follow_up_read" in result.output
     reports = list(tmp_path.glob("report-fake-*.txt"))
     assert len(reports) == 1
     assert "工具结果必须回灌" in reports[0].read_text(encoding="utf-8")
+    assert "追加写入验证完成" in reports[0].read_text(encoding="utf-8")
+    payloads = list(tmp_path.glob("payload-fake-*.bin"))
+    assert len(payloads) == 1
+    assert payloads[0].read_bytes() == b"agent-binary"

@@ -50,7 +50,7 @@ class Agent:
     """由模型选择动作，由 Python 执行工具并回灌 Observation。"""
 
     DEFAULT_SYSTEM_PROMPT = (
-        "你是课程文件 Agent。只能通过提供的工具了解和修改教学目录；"
+        "你是文件操作 Agent。只能通过提供的工具了解和修改工作目录；"
         "必须根据真实工具结果回答，不能把计划当作已经执行。"
     )
 
